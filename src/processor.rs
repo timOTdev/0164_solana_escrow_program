@@ -4,6 +4,9 @@ use solana_program::{
     program_error::ProgramError,
     msg,
     pubkey::Pubkey,
+    program_pack::{Pack, IsInitialized},
+    sysvar::{rent::Rent, Sysvar},
+    program::invoke
 };
 
 use crate::{instruction::EscrowInstruction, error::EscrowError, state::Escrow};
@@ -68,6 +71,49 @@ impl Processor {
         if escrow_info.is_initialized() {
             return Err(ProgramError::AccountAlreadyInitialized);
         }
+
+        escrow_info.is_initialized = true;
+        escrow_info.initializer_pubkey = *initializer.key;
+        escrow_info.temp_token_account_pubkey = *temp_token_account.key;
+        escrow_info.initializer_token_to_receive_account_pubkey = *token_to_receive_account.key;
+        escrow_info.expected_amount = amount;
+
+        // A default function which calls `pack_into_slice` internally.
+        Escrow::pack(escrow_info, &mut escrow_account.data.borrow_mut())?;
+        let (pda, _bump_seed) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        // One account we include in the `account_infos` of invoke.
+        let token_program = next_account_info(account_info_iter)?;
+
+        // The instructions to send with invoke.
+        // `set_authority` helps us build the instructions.
+        let owner_change_ix = spl_token::instruction::set_authority(
+            // Just the program id.
+            token_program.key,
+            // The account which we want to change authority.
+            temp_token_account.key,
+            // The new authority we are changing to.
+            Some(&pda),
+            // The type of authority for token accounts, specifically the owner.
+            // There are many types.
+            spl_token::instruction::AuthorityType::AccountOwner,
+            // The current account owner.
+            initializer.key,
+            // The public keys signing the CPI.
+            &[&initializer.key],
+        )?;
+
+        // Calling the token program from our escrow program.
+        // Takes 2 arguments: instruction and array of accounts.
+        msg!("Calling the token program to transfer token account ownership...");
+        invoke(
+            &owner_change_ix,
+            &[
+                temp_token_account.clone(),
+                initializer.clone(),
+                token_program.clone(),
+            ],
+        )?;
 
         Ok(())
     }
